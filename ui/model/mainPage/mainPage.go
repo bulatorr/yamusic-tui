@@ -2,10 +2,14 @@ package mainpage
 
 import (
 	"fmt"
+	"math"
 	"math/rand"
 	"net/url"
 	"strings"
+	"time"
 
+	ynisonGrpc "github.com/bulatorr/go-yaynison/ynison_grpc"
+	"github.com/bulatorr/go-yaynison/ynisonstate"
 	"github.com/dece2183/yamusic-tui/api"
 	"github.com/dece2183/yamusic-tui/config"
 	"github.com/dece2183/yamusic-tui/ui/components/playlist"
@@ -33,6 +37,9 @@ type Model struct {
 	isSearchActive       bool
 	currentPlaylistIndex int
 	likedTracksMap       map[string]bool
+	Ynison               *ynisonGrpc.Client
+	DeviceId             string
+	PlayerState          *ynisonstate.PlayerState
 }
 
 // mainpage.Model constructor.
@@ -66,8 +73,122 @@ func (m *Model) Run() error {
 		return err
 	}
 
+	// ynison integration start
+	err = m.Ynison.Connect()
+	if err != nil {
+		return err
+	}
+
+	// volume chan
+	ps := make(chan ynisonstate.PlayingStatus)
+	m.tracker.UpdatePlayingStatus = ps
+	go func() {
+		for i := range ps {
+			if m.Ynison.IsConnected() {
+				m.Ynison.UpdatePlayingStatus(&i)
+			}
+		}
+	}()
+
+	m.Ynison.OnMessage(func(pysr *ynisonstate.PutYnisonStateResponse) {
+		m.PlayerState = pysr.GetPlayerState()
+		// do anything only with current active device
+		if pysr.ActiveDeviceIdOptional.GetValue() != config.Current.DeviceID {
+			return
+		}
+		// update tracks in ynison playlist
+		for i, station := range m.playlist.Items() {
+			switch station.Kind {
+			case playlist.YNISON:
+				m.playlist.Select(i)
+				list := pysr.GetPlayerState().GetPlayerQueue().GetPlayableList()
+				ids := make([]string, 0)
+				for _, tr := range list {
+					ids = append(ids, tr.GetPlayableId())
+				}
+
+				station.CurrentTrack = int(pysr.GetPlayerState().GetPlayerQueue().GetCurrentPlayableIndex())
+				station.SelectedTrack = station.CurrentTrack
+				m.playlist.SetItem(i, station)
+				// send request only on playlist changes
+				if len(station.Tracks) != len(list) {
+					data, err := m.client.Tracks(ids)
+					if err != nil {
+						break
+					}
+					station.Tracks = data
+				}
+				m.currentPlaylistIndex = i
+				m.playlist.SetItem(i, station)
+
+			default:
+
+			}
+		}
+
+		// update screen
+		selectedPlaylist := m.playlist.SelectedItem()
+		currentPlaylist := m.playlist.Items()[m.currentPlaylistIndex]
+
+		if selectedPlaylist.IsSame(currentPlaylist) && len(selectedPlaylist.Tracks) > 0 {
+			selectedPlaylist.SelectedTrack = selectedPlaylist.CurrentTrack
+			m.playlist.SetItem(m.playlist.Index(), selectedPlaylist)
+		}
+
+		tracks := make([]tracklist.Item, 0, len(selectedPlaylist.Tracks))
+		for i := range selectedPlaylist.Tracks {
+			track := &selectedPlaylist.Tracks[i]
+			tracks = append(tracks, tracklist.NewItem(track))
+		}
+
+		m.tracklist.SetItems(tracks)
+		m.tracklist.Select(selectedPlaylist.SelectedTrack)
+
+		// changed track detection
+		index := pysr.GetPlayerState().GetPlayerQueue().GetCurrentPlayableIndex()
+		id := pysr.GetPlayerState().GetPlayerQueue().GetPlayableList()[index].GetPlayableId()
+		if id != m.tracker.CurrentTrack().Id {
+			m.playTrack(&selectedPlaylist.Tracks[selectedPlaylist.SelectedTrack])
+		}
+
+		// set progress
+		status := pysr.GetPlayerState().GetStatus()
+		delta := math.Abs(float64(status.GetProgressMs() - m.tracker.GetCurrentPos()))
+		if delta > 5000 {
+			d, err := time.ParseDuration(fmt.Sprint(status.GetProgressMs()-m.tracker.GetCurrentPos(), "ms"))
+			if err == nil {
+				m.tracker.Rewind(d, false)
+			}
+		}
+
+		// set pause
+		if status.GetPaused() {
+			m.tracker.Pause(false)
+		} else {
+			m.tracker.Play(false)
+		}
+
+		// set volume
+		for _, j := range pysr.GetDevices() {
+			if j.GetInfo().GetDeviceId() == config.Current.DeviceID {
+				volume := j.GetVolumeInfo().GetVolume()
+				if volume != m.tracker.Volume() {
+					m.tracker.SetVolume(volume)
+					config.Current.Volume = volume
+					config.Save()
+				}
+			}
+		}
+	})
+
+	// ynison integration end
+
 	_, err = m.program.Run()
 	return err
+}
+
+func (m *Model) GetPlayerState() ynisonstate.PlayerState {
+	return *m.PlayerState
 }
 
 func (m *Model) Send(msg tea.Msg) {
@@ -87,6 +208,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		cmd  tea.Cmd
 		cmds []tea.Cmd
 	)
+
+	m.tracker.YnisonPlaylist = m.playlist.SelectedItem().Kind == playlist.YNISON
 
 	switch msg := message.(type) {
 	case tea.WindowSizeMsg:
@@ -299,6 +422,47 @@ func (m *Model) initialLoad() error {
 		}
 	}
 
+	// ynison integration start
+	// replace default full state request
+	request := new(ynisonstate.PutYnisonStateRequest)
+	request.Parameters = &ynisonstate.PutYnisonStateRequest_UpdateFullState{
+		UpdateFullState: &ynisonstate.UpdateFullState{
+			PlayerState: &ynisonstate.PlayerState{
+				PlayerQueue: &ynisonstate.PlayerQueue{
+					CurrentPlayableIndex: -1,
+					EntityType:           ynisonstate.PlayerQueue_VARIOUS,
+					Options: &ynisonstate.PlayerStateOptions{
+						RepeatMode: ynisonstate.PlayerStateOptions_NONE,
+					},
+					EntityContext: ynisonstate.PlayerQueue_BASED_ON_ENTITY_BY_DEFAULT,
+				},
+				Status: &ynisonstate.PlayingStatus{
+					Paused:        true,
+					PlaybackSpeed: 1,
+				},
+			},
+			Device: &ynisonstate.UpdateDevice{
+				Info: &ynisonstate.DeviceInfo{
+					DeviceId: config.Current.DeviceID,
+					Type:     ynisonstate.DeviceType_WEB,
+					Title:    config.Current.DeviceName,
+					AppName:  "Chrome",
+				},
+				VolumeInfo: &ynisonstate.DeviceVolume{
+					Volume: config.Current.Volume,
+				},
+				Capabilities: &ynisonstate.DeviceCapabilities{
+					CanBePlayer:           true,
+					CanBeRemoteController: false,
+					VolumeGranularity:     uint32(1 / config.Current.VolumeStep),
+				},
+			},
+		},
+	}
+	m.Ynison = ynisonGrpc.NewClient(config.Current.Token, config.Current.DeviceID)
+	m.Ynison.ConfigMessage = request
+	// ynison integration end
+
 	for i, station := range m.playlist.Items() {
 		switch station.Kind {
 		case playlist.MYWAVE:
@@ -374,6 +538,15 @@ func (m *Model) prevTrack() {
 	m.playlist.SetItem(m.currentPlaylistIndex, currentPlaylist)
 	m.playTrack(&currentPlaylist.Tracks[currentPlaylist.CurrentTrack])
 
+	// ynison send current track id
+	if m.tracker.YnisonPlaylist && m.PlayerState != nil && m.PlayerState.PlayerQueue != nil {
+		m.PlayerState.PlayerQueue.CurrentPlayableIndex = int32(currentPlaylist.CurrentTrack)
+		m.PlayerState.Status.ProgressMs = 0
+		m.PlayerState.Status.DurationMs = int64(currentPlaylist.Tracks[currentPlaylist.CurrentTrack].DurationMs)
+		m.Ynison.UpdatePlayerState(m.PlayerState)
+	}
+	// end
+
 	selectedPlaylist := m.playlist.SelectedItem()
 	if currentPlaylist.IsSame(selectedPlaylist) && m.tracklist.Index() == currentPlaylist.CurrentTrack+1 {
 		m.tracklist.Select(currentPlaylist.CurrentTrack)
@@ -436,6 +609,15 @@ func (m *Model) nextTrack() {
 	m.playlist.SetItem(m.currentPlaylistIndex, currentPlaylist)
 	m.playTrack(&currentPlaylist.Tracks[currentPlaylist.CurrentTrack])
 
+	// ynison send current track id
+	if m.tracker.YnisonPlaylist && m.PlayerState != nil && m.PlayerState.PlayerQueue != nil {
+		m.PlayerState.PlayerQueue.CurrentPlayableIndex = int32(currentPlaylist.CurrentTrack)
+		m.PlayerState.Status.ProgressMs = 0
+		m.PlayerState.Status.DurationMs = int64(currentPlaylist.Tracks[currentPlaylist.CurrentTrack].DurationMs)
+		m.Ynison.UpdatePlayerState(m.PlayerState)
+	}
+	// end
+
 	selectedPlaylist := m.playlist.SelectedItem()
 	if currentPlaylist.IsSame(selectedPlaylist) && m.tracklist.Index() == currentPlaylist.CurrentTrack-1 {
 		m.tracklist.Select(currentPlaylist.CurrentTrack)
@@ -493,10 +675,10 @@ func (m *Model) playSelectedPlaylist(trackIndex int) {
 
 	if currentPlaylist.IsSame(selectedPlaylist) && m.tracker.CurrentTrack() == trackToPlay {
 		if m.tracker.IsPlaying() {
-			m.tracker.Pause()
+			m.tracker.Pause(true)
 			return
 		} else {
-			m.tracker.Play()
+			m.tracker.Play(true)
 			return
 		}
 	}
@@ -534,6 +716,16 @@ func (m *Model) playSelectedPlaylist(trackIndex int) {
 
 	m.currentPlaylistIndex = m.playlist.Index()
 	m.playlist.SetItem(m.currentPlaylistIndex, selectedPlaylist)
+
+	// ynison send current track id
+	if m.tracker.YnisonPlaylist && m.PlayerState != nil && m.PlayerState.PlayerQueue != nil {
+		m.PlayerState.PlayerQueue.CurrentPlayableIndex = int32(trackIndex)
+		m.PlayerState.Status.ProgressMs = 0
+		m.PlayerState.Status.DurationMs = int64(currentPlaylist.Tracks[trackIndex].DurationMs)
+		m.Ynison.UpdatePlayerState(m.PlayerState)
+	}
+	// end
+
 	m.playTrack(trackToPlay)
 }
 

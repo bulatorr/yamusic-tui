@@ -1,8 +1,11 @@
 module github.com/dece2183/yamusic-tui
 
-go 1.20
+go 1.22.1
+
+toolchain go1.23.0
 
 require (
+	github.com/bulatorr/go-yaynison v0.4.1-alpha
 	github.com/charmbracelet/bubbles v0.18.0
 	github.com/charmbracelet/bubbletea v0.26.6
 	github.com/charmbracelet/lipgloss v0.12.1
@@ -36,7 +39,12 @@ require (
 	golang.org/x/exp/shiny v0.0.0-20240205201215-2c58cdc269a3 // indirect
 	golang.org/x/image v0.15.0 // indirect
 	golang.org/x/mobile v0.0.0-20240112133503-c713f31d574b // indirect
+	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sync v0.7.0 // indirect
 	golang.org/x/sys v0.21.0 // indirect
-	golang.org/x/text v0.14.0 // indirect
+	golang.org/x/text v0.15.0 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20240701130421-f6361c86f094 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20240624140628-dc46fd24d27d // indirect
+	google.golang.org/grpc v1.65.0 // indirect
+	google.golang.org/protobuf v1.34.2 // indirect
 )

@@ -6,6 +6,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/bulatorr/go-yaynison/ynisonstate"
 	"github.com/dece2183/yamusic-tui/api"
 	"github.com/dece2183/yamusic-tui/config"
 	"github.com/dece2183/yamusic-tui/ui/helpers"
@@ -108,8 +109,10 @@ type Model struct {
 	player        *oto.Player
 	trackWrapper  *readWrapper
 
-	program  *tea.Program
-	likesMap *map[string]bool
+	program             *tea.Program
+	likesMap            *map[string]bool
+	YnisonPlaylist      bool
+	UpdatePlayingStatus chan ynisonstate.PlayingStatus
 }
 
 func New(p *tea.Program, likesMap *map[string]bool) *Model {
@@ -215,16 +218,16 @@ func (m *Model) Update(message tea.Msg) (*Model, tea.Cmd) {
 				break
 			}
 			if m.player.IsPlaying() {
-				m.Pause()
+				m.Pause(true)
 			} else {
-				m.Play()
+				m.Play(true)
 			}
 
 		case controls.PlayerRewindForward.Contains(keypress):
-			m.rewind(rewindAmount)
+			m.Rewind(rewindAmount, true)
 
 		case controls.PlayerRewindBackward.Contains(keypress):
-			m.rewind(-rewindAmount)
+			m.Rewind(-rewindAmount, true)
 
 		case controls.PlayerNext.Contains(keypress):
 			cmds = append(cmds, model.Cmd(NEXT))
@@ -251,9 +254,9 @@ func (m *Model) Update(message tea.Msg) (*Model, tea.Cmd) {
 	case Control:
 		switch msg {
 		case PLAY:
-			m.Play()
+			m.Play(true)
 		case PAUSE:
-			m.Pause()
+			m.Pause(true)
 		case STOP:
 			m.Stop()
 		case _UNEXPECTED_STOP:
@@ -310,6 +313,10 @@ func (m *Model) Volume() float64 {
 	return m.volume
 }
 
+func (m *Model) GetCurrentPos() int64 {
+	return int64(float64(m.track.DurationMs) * m.trackWrapper.trackReader.Progress())
+}
+
 func (m *Model) StartTrack(track *api.Track, reader *api.HttpReadSeeker) {
 	if m.player != nil {
 		m.Stop()
@@ -327,6 +334,16 @@ func (m *Model) StartTrack(track *api.Track, reader *api.HttpReadSeeker) {
 
 	m.player = m.playerContext.NewPlayer(m.trackWrapper)
 	m.player.SetVolume(m.volume)
+	if m.YnisonPlaylist {
+		currentPos := int64(float64(m.track.DurationMs) * m.trackWrapper.trackReader.Progress())
+		m.UpdatePlayingStatus <- ynisonstate.PlayingStatus{
+			ProgressMs:    currentPos,
+			DurationMs:    int64(m.track.DurationMs),
+			Paused:        false,
+			PlaybackSpeed: 1,
+		}
+		m.CurrentTrack()
+	}
 	m.player.Play()
 }
 
@@ -359,27 +376,47 @@ func (m *Model) CurrentTrack() *api.Track {
 	return m.track
 }
 
-func (m *Model) Play() {
+func (m *Model) Play(report bool) {
 	if m.player == nil || m.trackWrapper.trackReader == nil {
 		return
 	}
 	if m.player.IsPlaying() {
 		return
 	}
+	if m.YnisonPlaylist && report {
+		currentPos := int64(float64(m.track.DurationMs) * m.trackWrapper.trackReader.Progress())
+		m.UpdatePlayingStatus <- ynisonstate.PlayingStatus{
+			ProgressMs:    currentPos,
+			DurationMs:    int64(m.track.DurationMs),
+			Paused:        false,
+			PlaybackSpeed: 1,
+		}
+		m.CurrentTrack()
+	}
 	m.player.Play()
 }
 
-func (m *Model) Pause() {
+func (m *Model) Pause(report bool) {
 	if m.player == nil || m.trackWrapper.trackReader == nil {
 		return
 	}
 	if !m.player.IsPlaying() {
 		return
 	}
+	if m.YnisonPlaylist && report {
+		currentPos := int64(float64(m.track.DurationMs) * m.trackWrapper.trackReader.Progress())
+		m.UpdatePlayingStatus <- ynisonstate.PlayingStatus{
+			ProgressMs:    currentPos,
+			DurationMs:    int64(m.track.DurationMs),
+			Paused:        true,
+			PlaybackSpeed: 1,
+		}
+	}
+
 	m.player.Pause()
 }
 
-func (m *Model) rewind(amount time.Duration) {
+func (m *Model) Rewind(amount time.Duration, report bool) {
 	if m.player == nil || m.trackWrapper == nil {
 		go m.program.Send(STOP)
 		return
@@ -400,6 +437,15 @@ func (m *Model) rewind(amount time.Duration) {
 	} else {
 		m.player.Seek(currentPos, io.SeekStart)
 	}
+	if m.YnisonPlaylist && report {
+		current := int64(float64(m.track.DurationMs) * m.trackWrapper.trackReader.Progress())
+		m.UpdatePlayingStatus <- ynisonstate.PlayingStatus{
+			ProgressMs:    current,
+			DurationMs:    int64(m.track.DurationMs),
+			Paused:        m.IsPlaying(),
+			PlaybackSpeed: 1,
+		}
+	}
 }
 
 func (m *Model) restartTrack() {
@@ -417,5 +463,5 @@ func (m *Model) restartTrack() {
 
 	progress := m.trackWrapper.trackReader.Progress()
 	m.trackWrapper.trackReader.Seek(0, io.SeekStart)
-	m.rewind(time.Duration(float64(m.trackWrapper.trackDurationMs)*progress) * time.Millisecond)
+	m.Rewind(time.Duration(float64(m.trackWrapper.trackDurationMs)*progress)*time.Millisecond, true)
 }

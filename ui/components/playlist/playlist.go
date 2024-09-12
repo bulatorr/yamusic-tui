@@ -23,6 +23,7 @@ const (
 	NONE PlaylistType = iota
 	MYWAVE
 	LIKES
+	YNISON
 )
 
 type Model struct {
@@ -39,6 +40,7 @@ func New(p *tea.Program, title string) *Model {
 	playlistItems := []list.Item{
 		Item{Name: "my wave", Kind: MYWAVE, Active: true, Subitem: false, Infinite: true},
 		Item{Name: "likes", Kind: LIKES, Active: true, Subitem: false},
+		Item{Name: "Ynison", Kind: YNISON, Active: true, Subitem: false},
 
 		Item{Name: "", Kind: NONE, Active: false, Subitem: false},
 		Item{Name: "playlists:", Kind: NONE, Active: false, Subitem: false},

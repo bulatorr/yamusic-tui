@@ -76,6 +76,8 @@ type Controls struct {
 
 type Config struct {
 	Token          string   `yaml:"token"`
+	DeviceID       string   `yaml:"deviceid"`
+	DeviceName     string   `yaml:"device-name"`
 	BufferSize     float64  `yaml:"buffer-size-ms"`
 	RewindDuration float64  `yaml:"rewind-duration-s"`
 	Volume         float64  `yaml:"volume"`

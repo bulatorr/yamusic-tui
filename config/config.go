@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 
+	"github.com/dece2183/yamusic-tui/ui/helpers"
 	"gopkg.in/yaml.v3"
 )
 
@@ -57,6 +58,14 @@ func load() (Config, error) {
 	err = yaml.Unmarshal(configContent, &newConfig)
 	if err != nil {
 		return defaultConfig, err
+	}
+
+	// generate deviceID for ynison
+	if newConfig.DeviceID == "" {
+		newConfig.DeviceID = helpers.RandString(16)
+	}
+	if newConfig.DeviceName == "" {
+		newConfig.DeviceName = "Yamusic-TUI"
 	}
 
 	newControls := reflect.ValueOf(&newConfig.Controls).Elem()
